@@ -1,64 +1,100 @@
-import makeWASocket, { useMultiFileAuthState, fetchLatestBaileysVersion } from "@whiskeysockets/baileys";
-import qrcode from "qrcode-terminal";
-import "./keep_alive.js";
+// ==================== IMPORTS ====================
+const { default: makeWASocket, useSingleFileAuthState, delay } = require("@whiskeysockets/baileys");
+const express = require("express");
+const QRCode = require("qrcode");
 
-const votos = {};
+// ==================== AUTH ====================
+const { state, saveState } = useSingleFileAuthState("./auth_info.json");
 
-async function connectBot() {
-  const { state, saveCreds } = await useMultiFileAuthState("./session");
-  const { version } = await fetchLatestBaileysVersion();
+// ==================== EXPRESS SERVER ====================
+const app = express();
+const PORT = process.env.PORT || 3000;
 
-  const sock = makeWASocket({
-    version,
-    printQRInTerminal: true,
-    auth: state,
-  });
+// Endpoint principal
+app.get("/", (req, res) => {
+    res.send("<h1>Bot de WhatsApp corriendo</h1>");
+});
 
-  sock.ev.on("creds.update", saveCreds);
+app.listen(PORT, () => console.log(`Servidor web corriendo en puerto ${PORT}`));
 
-  sock.ev.on("messages.upsert", async ({ messages }) => {
-    const msg = messages[0];
-    if (!msg.message) return;
-    const from = msg.key.remoteJid;
-    const sender = msg.key.participant || msg.key.remoteJid;
+// ==================== BOT SOCKET ====================
+const sock = makeWASocket({ auth: state });
+sock.ev.on("creds.update", saveState);
 
-    if (msg.message.pollCreationMessage) {
-      const pollId = msg.key.id;
-      votos[pollId] = { votantes: new Set() };
-      await sock.sendMessage(from, { text: `✅ Encuesta detectada (ID: ${pollId})` });
+// ==================== CONEXIÓN Y QR ====================
+sock.ev.on("connection.update", async (update) => {
+    const { connection, qr } = update;
+
+    if (qr) {
+        console.log("QR generado en terminal:");
+        require("qrcode-terminal").generate(qr, { small: true });
+
+        // Mostrar QR grande en navegador
+        app.get("/", async (req, res) => {
+            const qrImage = await QRCode.toDataURL(qr);
+            res.send(`
+                <html>
+                <body style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;">
+                    <h1>Escanea este QR con WhatsApp</h1>
+                    <img src="${qrImage}" style="width:400px;height:400px;" />
+                </body>
+                </html>
+            `);
+        });
     }
 
-    if (msg.message.pollUpdateMessage) {
-      const pollId = msg.message.pollUpdateMessage.pollCreationMessageKey.id;
-      if (votos[pollId]) votos[pollId].votantes.add(sender);
+    if (connection === "open") console.log("✅ Conectado a WhatsApp!");
+});
+
+// ==================== FUNCIONES DEL BOT ====================
+
+// Mapa para guardar reacciones/votos por mensaje
+const voteData = {}; // { mensajeId: { votantes: Set(), todos: Set() } }
+
+// Función para contar votos/reacciones
+async function contarVotaciones(mensaje) {
+    const mensajeId = mensaje.key.id;
+
+    if (!voteData[mensajeId]) {
+        voteData[mensajeId] = { votantes: new Set(), todos: new Set() };
     }
 
-    if (msg.message.conversation === "!no_votaron") {
-      const pollIds = Object.keys(votos);
-      if (pollIds.length === 0)
-        return sock.sendMessage(from, { text: "❌ No se han detectado encuestas aún." });
+    const grupo = mensaje.key.remoteJid;
 
-      const pollId = pollIds[pollIds.length - 1];
-      const groupMetadata = await sock.groupMetadata(from);
-      const allMembers = groupMetadata.participants.map(p => p.id);
-      const noVotaron = allMembers.filter(m => !votos[pollId].votantes.has(m));
-
-      const lista = noVotaron.map(u => "• " + u.replace("@s.whatsapp.net", "")).join("\n");
-      await sock.sendMessage(from, {
-        text: `👥 No votaron (${noVotaron.length}):\n${lista || "Todos votaron 🎉"}`
-      });
+    // Guardar a todos los participantes del grupo
+    if (!voteData[mensajeId].todos.size) {
+        const groupMetadata = await sock.groupMetadata(grupo);
+        groupMetadata.participants.forEach(p => voteData[mensajeId].todos.add(p.id));
     }
-  });
 
-  sock.ev.on("connection.update", ({ connection, qr }) => {
-    if (qr) qrcode.generate(qr, { small: true });
-    if (connection === "close") {
-      console.log("❌ Conexión cerrada. Reintentando...");
-      connectBot();
-    } else if (connection === "open") {
-      console.log("✅ Bot conectado correctamente a WhatsApp!");
-    }
-  });
+    // Revisar reacciones (WhatsApp soporta extensiones)
+    const reactions = mensaje.message?.reactionMessage?.text || [];
+    reactions.forEach(userId => voteData[mensajeId].votantes.add(userId));
 }
 
-connectBot();
+// Función para mostrar fantasmas (no votaron ni reaccionaron)
+function getFantasmas(mensajeId) {
+    const data = voteData[mensajeId];
+    if (!data) return [];
+
+    const fantasmas = [...data.todos].filter(u => !data.votantes.has(u));
+    return fantasmas;
+}
+
+// ==================== EVENTO DE MENSAJES ====================
+sock.ev.on("messages.upsert", async ({ messages, type }) => {
+    const msg = messages[0];
+    if (!msg.message || msg.key.fromMe) return;
+
+    const text = msg.message.conversation || msg.message.extendedTextMessage?.text;
+
+    // Comando para mostrar fantasmas de un mensaje
+    if (text === "#fantasmas") {
+        const mensajeId = msg.key.id; // Podrías cambiar por ID de encuesta específica
+        const fantasmas = getFantasmas(mensajeId);
+        await sock.sendMessage(msg.key.remoteJid, { text: "Usuarios que no votaron ni reaccionaron:\n" + fantasmas.join("\n") });
+    }
+
+    // Contar reacciones/votos
+    await contarVotaciones(msg);
+});
