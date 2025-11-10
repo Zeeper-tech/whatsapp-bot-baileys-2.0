@@ -1,14 +1,18 @@
 {
-  "name": "whatsapp-bot-poll",
+  "name": "whatsapp-bot",
   "version": "1.0.0",
+  "description": "Bot de WhatsApp para contar votos y mostrar QR",
   "main": "index.js",
-  "type": "module",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "@whiskeysockets/baileys": "^6.6.0",
-    "qrcode-terminal": "^0.12.0",
-    "express": "^4.19.2"
+    "@whiskeysockets/baileys": "^5.0.0",
+    "express": "^4.18.2",
+    "qrcode": "^1.5.1",
+    "qrcode-terminal": "^0.12.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
